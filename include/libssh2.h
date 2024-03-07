@@ -381,6 +381,12 @@ typedef struct _LIBSSH2_SK_SIG_INFO {
     void name(LIBSSH2_SESSION *session, void **session_abstract, \
               LIBSSH2_CHANNEL *channel, void **channel_abstract)
 
+#define LIBSSH2_CHANNEL_DATA_FUNC(name) \
+    void name(LIBSSH2_SESSION *session, void **session_abstract, \
+              LIBSSH2_CHANNEL *channel, void **channel_abstract, \
+			  int datatype, const char *data, size_t datalen, int is_stderr \
+        )
+
 /* I/O callbacks */
 #define LIBSSH2_RECV_FUNC(name)                                         \
     ssize_t name(libssh2_socket_t socket,                               \
@@ -391,17 +397,39 @@ typedef struct _LIBSSH2_SK_SIG_INFO {
                  const void *buffer, size_t length,                     \
                  int flags, void **abstract)
 
+#define LIBSSH2_CHANNEL_OPEN_FUNC(name)       \
+    ssize_t name(LIBSSH2_SESSION *session,    \
+                 LIBSSH2_CHANNEL *channel,    \
+                 void **abstract)
+
+#define LIBSSH2_SFTP_INIT_FUNC(name)          \
+	ssize_t name(LIBSSH2_SESSION *session,    \
+                 LIBSSH2_SFTP* sftp,          \
+                 void **abstract)
+
+#define LIBSSH2_SCP_INIT_FUNC(name)           \
+	ssize_t name(LIBSSH2_SESSION *session,    \
+                 LIBSSH2_CHANNEL* scp,        \
+                 void **abstract)
+
+
 /* libssh2_session_callback_set() constants */
-#define LIBSSH2_CALLBACK_IGNORE               0
-#define LIBSSH2_CALLBACK_DEBUG                1
-#define LIBSSH2_CALLBACK_DISCONNECT           2
-#define LIBSSH2_CALLBACK_MACERROR             3
-#define LIBSSH2_CALLBACK_X11                  4
-#define LIBSSH2_CALLBACK_SEND                 5
-#define LIBSSH2_CALLBACK_RECV                 6
-#define LIBSSH2_CALLBACK_AUTHAGENT            7
-#define LIBSSH2_CALLBACK_AUTHAGENT_IDENTITIES 8
-#define LIBSSH2_CALLBACK_AUTHAGENT_SIGN       9
+enum LIBSSH2_CALLBACKS {
+    LIBSSH2_CALLBACK_IGNORE = 0,
+    LIBSSH2_CALLBACK_DEBUG = 1,
+    LIBSSH2_CALLBACK_DISCONNECT = 2,
+    LIBSSH2_CALLBACK_MACERROR = 3,
+    LIBSSH2_CALLBACK_X11 = 4,
+    LIBSSH2_CALLBACK_SEND = 5,
+    LIBSSH2_CALLBACK_RECV = 6,
+    LIBSSH2_CALLBACK_AUTHAGENT = 7,
+    LIBSSH2_CALLBACK_AUTHAGENT_IDENTITIES = 8,
+    LIBSSH2_CALLBACK_AUTHAGENT_SIGN = 9,
+    LIBSSH2_CALLBACK_CHANNEL_OPEN,
+
+    LIBSSH2_CALLBACK_CHANNEL_CLOSE,
+    LIBSSH2_CALLBACK_CHANNEL_DATA
+};
 
 /* libssh2_session_method_pref() constants */
 #define LIBSSH2_METHOD_KEX          0
@@ -646,6 +674,7 @@ LIBSSH2_API LIBSSH2_SESSION *
 libssh2_session_init_ex(LIBSSH2_ALLOC_FUNC((*my_alloc)),
                         LIBSSH2_FREE_FUNC((*my_free)),
                         LIBSSH2_REALLOC_FUNC((*my_realloc)), void *abstract);
+
 #define libssh2_session_init() libssh2_session_init_ex(NULL, NULL, NULL, NULL)
 
 LIBSSH2_API void **libssh2_session_abstract(LIBSSH2_SESSION *session);
@@ -653,21 +682,21 @@ LIBSSH2_API void **libssh2_session_abstract(LIBSSH2_SESSION *session);
 typedef void (libssh2_cb_generic)(void);
 
 LIBSSH2_API libssh2_cb_generic *
-libssh2_session_callback_set2(LIBSSH2_SESSION *session, int cbtype,
+libssh2_session_callback_set2(LIBSSH2_SESSION *session, enum LIBSSH2_CALLBACKS cbtype,
                               libssh2_cb_generic *callback);
 
-LIBSSH2_DEPRECATED(1.11.1, "Use libssh2_session_callback_set2()")
-LIBSSH2_API void *libssh2_session_callback_set(LIBSSH2_SESSION *session,
-                                               int cbtype, void *callback);
+//LIBSSH2_DEPRECATED(1.11.1, "Use libssh2_session_callback_set2()")
+//LIBSSH2_API void *libssh2_session_callback_set(LIBSSH2_SESSION *session,
+//                                               int cbtype, void *callback);
 LIBSSH2_API int libssh2_session_banner_set(LIBSSH2_SESSION *session,
                                            const char *banner);
 #ifndef LIBSSH2_NO_DEPRECATED
-LIBSSH2_DEPRECATED(1.4.0, "Use libssh2_session_banner_set()")
-LIBSSH2_API int libssh2_banner_set(LIBSSH2_SESSION *session,
-                                   const char *banner);
+//LIBSSH2_DEPRECATED(1.4.0, "Use libssh2_session_banner_set()")
+//LIBSSH2_API int libssh2_banner_set(LIBSSH2_SESSION *session,
+//                                   const char *banner);
 
-LIBSSH2_DEPRECATED(1.2.8, "Use libssh2_session_handshake()")
-LIBSSH2_API int libssh2_session_startup(LIBSSH2_SESSION *session, int sock);
+//LIBSSH2_DEPRECATED(1.2.8, "Use libssh2_session_handshake()")
+//LIBSSH2_API int libssh2_session_startup(LIBSSH2_SESSION *session, int sock);
 #endif
 LIBSSH2_API int libssh2_session_handshake(LIBSSH2_SESSION *session,
                                           libssh2_socket_t sock);
@@ -835,6 +864,17 @@ LIBSSH2_API int libssh2_poll(LIBSSH2_POLLFD *fds, unsigned int nfds,
 /* Returned by any function that would block during a read/write operation */
 #define LIBSSH2CHANNEL_EAGAIN LIBSSH2_ERROR_EAGAIN
 
+// sets channel callbacks
+// channel callbacks are invoked with session and session abstract
+// as well as channel and channel abstract
+LIBSSH2_API libssh2_cb_generic*
+libssh2_channel_callback_set( LIBSSH2_CHANNEL* channel, enum LIBSSH2_CALLBACKS cbtype,
+    libssh2_cb_generic* callback );
+
+// can be used to set/get channel abstract
+LIBSSH2_API void** libssh2_channel_abstract( LIBSSH2_CHANNEL* channel );
+
+
 LIBSSH2_API LIBSSH2_CHANNEL *
 libssh2_channel_open_ex(LIBSSH2_SESSION *session, const char *channel_type,
                         unsigned int channel_type_len,
@@ -1001,9 +1041,9 @@ LIBSSH2_API void libssh2_session_set_read_timeout(LIBSSH2_SESSION* session,
 LIBSSH2_API long libssh2_session_get_read_timeout(LIBSSH2_SESSION* session);
 
 #ifndef LIBSSH2_NO_DEPRECATED
-LIBSSH2_DEPRECATED(1.1.0, "libssh2_channel_handle_extended_data2()")
-LIBSSH2_API void libssh2_channel_handle_extended_data(LIBSSH2_CHANNEL *channel,
-                                                      int ignore_mode);
+//LIBSSH2_DEPRECATED(1.1.0, "libssh2_channel_handle_extended_data2()")
+//LIBSSH2_API void libssh2_channel_handle_extended_data(LIBSSH2_CHANNEL *channel,
+//                                                      int ignore_mode);
 #endif
 LIBSSH2_API int libssh2_channel_handle_extended_data2(LIBSSH2_CHANNEL *channel,
                                                       int ignore_mode);
@@ -1017,10 +1057,10 @@ LIBSSH2_API int libssh2_channel_handle_extended_data2(LIBSSH2_CHANNEL *channel,
  * (FIFO) from the standard data channel
  */
 /* DEPRECATED since 0.3.0. Use libssh2_channel_handle_extended_data2(). */
-#define libssh2_channel_ignore_extended_data(channel, ignore)                 \
-    libssh2_channel_handle_extended_data((channel), (ignore) ?                \
-                                       LIBSSH2_CHANNEL_EXTENDED_DATA_IGNORE : \
-                                       LIBSSH2_CHANNEL_EXTENDED_DATA_NORMAL)
+//#define libssh2_channel_ignore_extended_data(channel, ignore)                 \
+//    libssh2_channel_handle_extended_data((channel), (ignore) ?                \
+//                                       LIBSSH2_CHANNEL_EXTENDED_DATA_IGNORE : \
+//                                       LIBSSH2_CHANNEL_EXTENDED_DATA_NORMAL)
 #endif
 
 #define LIBSSH2_CHANNEL_FLUSH_EXTENDED_DATA     -1

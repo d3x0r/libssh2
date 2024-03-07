@@ -339,8 +339,8 @@ scp_recv(LIBSSH2_SESSION * session, const char *path, libssh2_struct_stat * sb)
             _libssh2_channel_open(session, "session",
                                   sizeof("session") - 1,
                                   LIBSSH2_CHANNEL_WINDOW_DEFAULT,
-                                  LIBSSH2_CHANNEL_PACKET_DEFAULT, NULL,
-                                  0);
+                                  LIBSSH2_CHANNEL_PACKET_DEFAULT,
+                                  0, NULL, NULL );
         if(!session->scpRecv_channel) {
             if(libssh2_session_last_errno(session) !=
                 LIBSSH2_ERROR_EAGAIN) {
@@ -363,7 +363,9 @@ scp_recv(LIBSSH2_SESSION * session, const char *path, libssh2_struct_stat * sb)
         rc = _libssh2_channel_process_startup(session->scpRecv_channel, "exec",
                                               sizeof("exec") - 1,
                                               (char *)session->scpRecv_command,
-                                              session->scpRecv_command_len);
+                                              session->scpRecv_command_len,
+                                              NULL
+                                              );
         if(rc == LIBSSH2_ERROR_EAGAIN) {
             _libssh2_error(session, LIBSSH2_ERROR_EAGAIN,
                            "Would block requesting SCP startup");
@@ -913,7 +915,7 @@ scp_send(LIBSSH2_SESSION * session, const char *path, int mode,
         session->scpSend_channel =
             _libssh2_channel_open(session, "session", sizeof("session") - 1,
                                   LIBSSH2_CHANNEL_WINDOW_DEFAULT,
-                                  LIBSSH2_CHANNEL_PACKET_DEFAULT, NULL, 0);
+                                  LIBSSH2_CHANNEL_PACKET_DEFAULT, 0, NULL );
         if(!session->scpSend_channel) {
             if(libssh2_session_last_errno(session) != LIBSSH2_ERROR_EAGAIN) {
                 /* previous call set libssh2_session_last_error(), pass it
@@ -937,7 +939,8 @@ scp_send(LIBSSH2_SESSION * session, const char *path, int mode,
         rc = _libssh2_channel_process_startup(session->scpSend_channel, "exec",
                                               sizeof("exec") - 1,
                                               (char *)session->scpSend_command,
-                                              session->scpSend_command_len);
+                                              session->scpSend_command_len,
+                                              NULL);
         if(rc == LIBSSH2_ERROR_EAGAIN) {
             _libssh2_error(session, LIBSSH2_ERROR_EAGAIN,
                            "Would block requesting SCP startup");

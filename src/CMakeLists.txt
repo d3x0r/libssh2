@@ -97,14 +97,14 @@ set(SOURCES ${CSOURCES} ${HHEADERS})
 # when building both static and shared library. On Windows, with certain
 # toolchains (e.g. MSVC) these libraries get the same by default, overwriting
 # each other. MinGW is not affected.
-if(WIN32 AND BUILD_STATIC_LIBS AND BUILD_SHARED_LIBS AND
+if(WIN32 AND LIBSSH2_BUILD_STATIC_LIBS AND LIBSSH2_BUILD_SHARED_LIBS AND
    NOT STATIC_LIB_SUFFIX AND NOT IMPORT_LIB_SUFFIX AND
    CMAKE_STATIC_LIBRARY_SUFFIX STREQUAL CMAKE_IMPORT_LIBRARY_SUFFIX)
   set(STATIC_LIB_SUFFIX "_static")
 endif()
 
 # we want it to be called libssh2 on all platforms
-if(BUILD_STATIC_LIBS)
+if(NOT EXISTS LIBSSH2_BUILD_SHARED_LIBS OR LIBSSH2_BUILD_STATIC_LIBS)
   list(APPEND libssh2_export ${LIB_STATIC})
   add_library(${LIB_STATIC} STATIC ${SOURCES})
   add_library(${PROJECT_NAME}::${LIB_STATIC} ALIAS ${LIB_STATIC})
@@ -120,7 +120,7 @@ if(BUILD_STATIC_LIBS)
       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
       "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_INCLUDEDIR}>")
 endif()
-if(BUILD_SHARED_LIBS)
+if(LIBSSH2_BUILD_SHARED_LIBS)
   list(APPEND libssh2_export ${LIB_SHARED})
   add_library(${LIB_SHARED} SHARED ${SOURCES})
   add_library(${PROJECT_NAME}::${LIB_SHARED} ALIAS ${LIB_SHARED})
@@ -143,24 +143,24 @@ if(BUILD_SHARED_LIBS)
 endif()
 
 add_library(${PROJECT_NAME}::${LIB_NAME} ALIAS ${LIB_SELECTED})
-add_library(${LIB_NAME} ALIAS ${LIB_SELECTED})
+#add_library(${LIB_NAME} ALIAS ${LIB_SELECTED})
 
 ## Installation
-
+if( NOT LIBSSH2_SKIP_INSTALL )
 install(FILES
   "${PROJECT_SOURCE_DIR}/include/libssh2.h"
   "${PROJECT_SOURCE_DIR}/include/libssh2_publickey.h"
   "${PROJECT_SOURCE_DIR}/include/libssh2_sftp.h"
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-if(BUILD_STATIC_LIBS)
+if(LIBSSH2_BUILD_STATIC_LIBS)
   install(TARGETS ${LIB_STATIC}
     EXPORT "${PROJECT_NAME}-targets"
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
-if(BUILD_SHARED_LIBS)
+if(LIBSSH2_BUILD_SHARED_LIBS)
   install(TARGETS ${LIB_SHARED}
     EXPORT "${PROJECT_NAME}-targets"
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -226,3 +226,5 @@ write_basic_package_version_file(
 install(
   FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-config-version.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+
+  endif( NOT LIBSSH2_SKIP_INSTALL )

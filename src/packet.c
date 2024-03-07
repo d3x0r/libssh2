@@ -949,6 +949,37 @@ libssh2_packet_add_jump_point5:
               string    data
             */
 
+        case SSH_MSG_CHANNEL_OPEN_CONFIRMATION:
+        case SSH_MSG_CHANNEL_OPEN_FAILURE:
+            session->channel_open_receive( session, data, datalen );
+            break;
+
+        case SSH_MSG_REQUEST_SUCCESS:
+        case SSH_MSG_REQUEST_FAILURE:
+            session->channel_forward_listen_receive( session, data, datalen );
+            break;
+
+        case SSH_MSG_CHANNEL_SUCCESS:
+        case SSH_MSG_CHANNEL_FAILURE:
+            if( datalen >= 5 ) {
+                channelp = _libssh2_channel_locate( session, _libssh2_ntohu32( data + 1 ) );
+                if( channelp ) {
+                    void ( *recv )( LIBSSH2_CHANNEL* channel, void** data, size_t* datalen );
+                    recv = ( void ( * )( LIBSSH2_CHANNEL * channel, void** data, size_t * datalen ) )DequeLink( &channelp->receive );
+                    recv( channelp, data, datalen );
+                }  else {
+                    _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_UNKNOWN,
+                                   "Packet received for unknown channel");
+                }
+            }
+            LIBSSH2_FREE( session, data );
+
+            break;
+
+        case SSH_FXP_NAME:
+        case SSH_FXP_STATUS:
+            break;
+
         case SSH_MSG_CHANNEL_EXTENDED_DATA:
             /* streamid(4) */
             data_head += 4;
@@ -1485,6 +1516,7 @@ _libssh2_packet_require(LIBSSH2_SESSION * session, unsigned char packet_type,
                         size_t match_len,
                         packet_require_state_t *state)
 {
+    ( *(int*)0 ) = 0;
     if(state->start == 0) {
         if(_libssh2_packet_ask(session, packet_type, data, data_len,
                                match_ofs, match_buf,

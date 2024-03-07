@@ -52,6 +52,7 @@
 
 #define LIBSSH2_LIBRARY
 
+#include <sack_types.h>
 /* platform/compiler-specific setup */
 #include "libssh2_setup.h"
 
@@ -259,6 +260,11 @@ struct iovec {
     channel->close_cb((session), &(session)->abstract, \
                       (channel), &(channel)->abstract)
 
+#define LIBSSH2_CHANNEL_DATA(session, channel, datatype, data, datalen, isStderr ) \
+    channel->close_cb((session), &(session)->abstract, \
+                      (channel), &(channel)->abstract \
+                      , datatype, data, datalen, isStderr )
+
 #define LIBSSH2_SEND_FD(session, fd, buffer, length, flags) \
     (session->send)(fd, buffer, length, flags, &session->abstract)
 #define LIBSSH2_RECV_FD(session, fd, buffer, length, flags) \
@@ -268,6 +274,11 @@ struct iovec {
     LIBSSH2_SEND_FD(session, session->socket_fd, buffer, length, flags)
 #define LIBSSH2_RECV(session, buffer, length, flags) \
     LIBSSH2_RECV_FD(session, session->socket_fd, buffer, length, flags)
+
+#define LIBSSH2_CHANNEL_OPEN(session, channel) \
+    session->channel_open(session, channel, &session->abstract );
+#define LIBSSH2_SFTP_INIT(session, sftp) \
+	session->sftp_init(session, sftp, &session->abstract );
 
 typedef struct _LIBSSH2_KEX_METHOD LIBSSH2_KEX_METHOD;
 typedef struct _LIBSSH2_HOSTKEY_METHOD LIBSSH2_HOSTKEY_METHOD;
@@ -326,6 +337,8 @@ typedef struct kmdhgGPshakex_state_t
     _libssh2_bn *e;
     _libssh2_bn *f;
     _libssh2_bn *k;
+    _libssh2_bn* p;
+
     unsigned char *f_value;
     unsigned char *k_value;
     unsigned char *h_sig;
@@ -335,6 +348,15 @@ typedef struct kmdhgGPshakex_state_t
     void *exchange_hash;
     packet_require_state_t req_state;
     libssh2_nonblocking_states burn_state;
+    int digest_len;
+    int sha_algo_value;
+
+    libssh2_sha1_ctx exchange_hash_ctx;
+    unsigned char packet_type_init;
+    unsigned char packet_type_reply;
+    unsigned char* midhash;
+    size_t midhash_len;
+
 } kmdhgGPshakex_state_t;
 
 typedef struct key_exchange_state_low_t
@@ -356,6 +378,7 @@ typedef struct key_exchange_state_low_t
                                              bytes */
     unsigned char *curve25519_private_key; /* curve25519 private key, 32
                                               bytes */
+
 } key_exchange_state_low_t;
 
 typedef struct key_exchange_state_t
@@ -468,6 +491,7 @@ struct _LIBSSH2_CHANNEL
 
     void *abstract;
       LIBSSH2_CHANNEL_CLOSE_FUNC((*close_cb));
+      LIBSSH2_CHANNEL_DATA_FUNC((*data_cb));
 
     /* State variables used in libssh2_channel_setenv_ex() */
     libssh2_nonblocking_states setenv_state;
@@ -547,6 +571,9 @@ struct _LIBSSH2_CHANNEL
     libssh2_nonblocking_states sendsignal_state;
     unsigned char *sendsignal_packet;
     size_t sendsignal_packet_len;
+
+    PLINKQUEUE receive;
+
 };
 
 struct _LIBSSH2_LISTENER
@@ -688,6 +715,9 @@ struct _LIBSSH2_SESSION
     LIBSSH2_AUTHAGENT_SIGN_FUNC((*agentSignCallback));
     LIBSSH2_SEND_FUNC((*send));
     LIBSSH2_RECV_FUNC((*recv));
+    LIBSSH2_CHANNEL_OPEN_FUNC((*channel_open));
+    LIBSSH2_SFTP_INIT_FUNC((*sftp_init));
+    LIBSSH2_SCP_INIT_FUNC( ( *scp_init ) );
 
     /* Method preferences -- NULL yields "load order" */
     char *kex_prefs;
@@ -700,6 +730,9 @@ struct _LIBSSH2_SESSION
 
     /* Agreed Key Exchange Method */
     const LIBSSH2_KEX_METHOD *kex;
+    int ( *kex_receive )( LIBSSH2_SESSION* session, LIBSSH2_PACKET* );
+    void ( *kex_complete )( LIBSSH2_SESSION* session );
+
     unsigned int burn_optimistic_kexinit;
 
     unsigned char *session_id;
@@ -873,7 +906,13 @@ struct _LIBSSH2_SESSION
     unsigned char *open_data;
     size_t open_data_len;
     uint32_t open_local_channel;
-
+    int (*channel_open_receive)(LIBSSH2_SESSION *session,
+								//LIBSSH2_CHANNEL *channel,
+								const uint8_t *data, size_t datalen );
+    PLINKQUEUE channel_opens;
+    void (*channel_forward_listen_receive)(LIBSSH2_SESSION *session,
+										   //LIBSSH2_LISTENER *listener,
+										   const uint8_t *data, size_t datalen );
     /* State variables used in libssh2_channel_direct_tcpip_ex() */
     libssh2_nonblocking_states direct_state;
     unsigned char *direct_message;
@@ -949,6 +988,11 @@ struct _LIBSSH2_SESSION
 
     /* Configurable timeout for packets. Replaces LIBSSH2_READ_TIMEOUT */
     long packet_read_timeout;
+
+    const char* channel_forward_listen_host;
+    int channel_forward_queue_maxsize;
+    int channel_forward_port;
+    int* channel_forward_bound_port;
 };
 
 /* session.state bits */
@@ -983,7 +1027,6 @@ struct _LIBSSH2_KEX_METHOD
        error */
     int (*exchange_keys) (LIBSSH2_SESSION * session,
                           key_exchange_state_low_t * key_state);
-
     long flags;
 };
 
@@ -1167,6 +1210,36 @@ _libssh2_debug_low(LIBSSH2_SESSION * session, int context, const char *format,
 #define SSH_MSG_CHANNEL_REQUEST                     98
 #define SSH_MSG_CHANNEL_SUCCESS                     99
 #define SSH_MSG_CHANNEL_FAILURE                     100
+
+
+/* SFTP packet types */
+#define SSH_FXP_INIT                            1
+#define SSH_FXP_VERSION                         2
+#define SSH_FXP_OPEN                            3
+#define SSH_FXP_CLOSE                           4
+#define SSH_FXP_READ                            5
+#define SSH_FXP_WRITE                           6
+#define SSH_FXP_LSTAT                           7
+#define SSH_FXP_FSTAT                           8
+#define SSH_FXP_SETSTAT                         9
+#define SSH_FXP_FSETSTAT                        10
+#define SSH_FXP_OPENDIR                         11
+#define SSH_FXP_READDIR                         12
+#define SSH_FXP_REMOVE                          13
+#define SSH_FXP_MKDIR                           14
+#define SSH_FXP_RMDIR                           15
+#define SSH_FXP_REALPATH                        16
+#define SSH_FXP_STAT                            17
+#define SSH_FXP_RENAME                          18
+#define SSH_FXP_READLINK                        19
+#define SSH_FXP_SYMLINK                         20
+#define SSH_FXP_STATUS                          101
+#define SSH_FXP_HANDLE                          102
+#define SSH_FXP_DATA                            103
+#define SSH_FXP_NAME                            104
+#define SSH_FXP_ATTRS                           105
+#define SSH_FXP_EXTENDED                        200
+#define SSH_FXP_EXTENDED_REPLY                  201
 
 /* Error codes returned in SSH_MSG_CHANNEL_OPEN_FAILURE message
    (see RFC4254) */

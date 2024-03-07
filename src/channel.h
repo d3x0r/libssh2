@@ -94,7 +94,9 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
                       uint32_t channel_type_len,
                       uint32_t window_size,
                       uint32_t packet_size,
-                      const unsigned char *message, size_t message_len);
+                      const unsigned char *message, size_t message_len,
+                      void ( *complete )( LIBSSH2_SESSION* session, LIBSSH2_CHANNEL* channel, void** abstract ) 
+);
 
 
 /*
@@ -105,7 +107,8 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
 int
 _libssh2_channel_process_startup(LIBSSH2_CHANNEL *channel,
                                  const char *request, size_t request_len,
-                                 const char *message, size_t message_len);
+                                 const char *message, size_t message_len,
+                                 void (*complete)( LIBSSH2_CHANNEL* channel, const uint8_t* data, size_t datalen ));
 
 /*
  * _libssh2_channel_read

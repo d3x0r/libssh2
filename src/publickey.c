@@ -306,7 +306,7 @@ static LIBSSH2_PUBLICKEY *publickey_init(LIBSSH2_SESSION *session)
 {
     int response;
     int rc;
-
+    fprintf( stderr, "publickey init not supported yet\n" );
     if(session->pkeyInit_state == libssh2_NB_state_idle) {
         session->pkeyInit_data = NULL;
         session->pkeyInit_pkey = NULL;
@@ -325,7 +325,7 @@ static LIBSSH2_PUBLICKEY *publickey_init(LIBSSH2_SESSION *session)
                                   sizeof("session") - 1,
                                   LIBSSH2_CHANNEL_WINDOW_DEFAULT,
                                   LIBSSH2_CHANNEL_PACKET_DEFAULT, NULL,
-                                  0);
+                                  0, NULL);
         if(!session->pkeyInit_channel) {
             if(libssh2_session_last_errno(session) == LIBSSH2_ERROR_EAGAIN)
                 /* The error state is already set, so leave it */
@@ -343,7 +343,8 @@ static LIBSSH2_PUBLICKEY *publickey_init(LIBSSH2_SESSION *session)
                                               "subsystem",
                                               sizeof("subsystem") - 1,
                                               "publickey",
-                                              sizeof("publickey") - 1);
+                                              sizeof("publickey") - 1
+                                            , NULL );
         if(rc == LIBSSH2_ERROR_EAGAIN) {
             _libssh2_error(session, LIBSSH2_ERROR_EAGAIN,
                            "Would block starting publickey subsystem");

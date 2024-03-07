@@ -122,6 +122,139 @@ _libssh2_channel_locate(LIBSSH2_SESSION *session, uint32_t channel_id)
     return NULL;
 }
 
+static void libssh2_channel_open_final( LIBSSH2_SESSION* session ) {
+
+    if( session->open_data ) {
+        LIBSSH2_FREE( session, session->open_data );
+        session->open_data = NULL;
+    }
+    if( session->open_packet ) {
+        LIBSSH2_FREE( session, session->open_packet );
+        session->open_packet = NULL;
+    }
+    if( session->open_channel ) {
+        unsigned char channel_id[4];
+        LIBSSH2_FREE( session, session->open_channel->channel_type );
+
+        _libssh2_list_remove( &session->open_channel->node );
+
+        /* Clear out packets meant for this channel */
+        _libssh2_htonu32( channel_id, session->open_channel->local.id );
+        while( ( _libssh2_packet_ask( session, SSH_MSG_CHANNEL_DATA,
+            &session->open_data,
+            &session->open_data_len, 1,
+            channel_id, 4 ) >= 0 )
+            ||
+            ( _libssh2_packet_ask( session, SSH_MSG_CHANNEL_EXTENDED_DATA,
+                &session->open_data,
+                &session->open_data_len, 1,
+                channel_id, 4 ) >= 0 ) ) {
+            LIBSSH2_FREE( session, session->open_data );
+            session->open_data = NULL;
+        }
+
+        LIBSSH2_FREE( session, session->open_channel );
+        session->open_channel = NULL;
+    }
+
+    session->open_state = libssh2_NB_state_idle;
+
+}
+
+static int libssh2_channel_open_receive( LIBSSH2_SESSION* session, const uint8_t *data, size_t datalen ) {
+
+    int rc = 0;
+    session->open_data = data;
+    session->open_data_len = datalen;
+    /*
+    rc = _libssh2_packet_requirev( session, reply_codes,
+        &session->open_data,
+        &session->open_data_len, 1,
+        session->open_packet + 5 +
+        channel_type_len, 4,
+        &session->open_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        _libssh2_error( session, LIBSSH2_ERROR_EAGAIN, "Would block" );
+        return NULL;
+    } else if( rc ) {
+        _libssh2_error( session, rc, "Unexpected error" );
+        goto channel_error;
+    }
+    */
+
+    if( session->open_data_len < 1 ) {
+        rc = _libssh2_error( session, LIBSSH2_ERROR_PROTO,
+            "Unexpected packet size" );
+        libssh2_channel_open_final( session );
+        return rc;
+    }
+
+    if( session->open_data[0] == SSH_MSG_CHANNEL_OPEN_CONFIRMATION ) {
+
+        if( session->open_data_len < 17 ) {
+            _libssh2_error( session, LIBSSH2_ERROR_PROTO,
+                "Unexpected packet size" );
+            libssh2_channel_open_final( session );
+            return rc;
+        }
+
+        session->open_channel->remote.id =
+            _libssh2_ntohu32( session->open_data + 5 );
+        session->open_channel->local.window_size =
+            _libssh2_ntohu32( session->open_data + 9 );
+        session->open_channel->local.window_size_initial =
+            _libssh2_ntohu32( session->open_data + 9 );
+        session->open_channel->local.packet_size =
+            _libssh2_ntohu32( session->open_data + 13 );
+        _libssh2_debug( ( session, LIBSSH2_TRACE_CONN,
+            "Connection Established - ID: %u/%u win: %u/%u"
+            " pack: %u/%u",
+            session->open_channel->local.id,
+            session->open_channel->remote.id,
+            session->open_channel->local.window_size,
+            session->open_channel->remote.window_size,
+            session->open_channel->local.packet_size,
+            session->open_channel->remote.packet_size ) );
+        LIBSSH2_FREE( session, session->open_packet );
+        session->open_packet = NULL;
+        LIBSSH2_FREE( session, session->open_data );
+        session->open_data = NULL;
+
+        session->open_state = libssh2_NB_state_idle;
+
+        LIBSSH2_CHANNEL_OPEN( session, session->open_channel );
+        return 0;
+    }
+
+    if( session->open_data[0] == SSH_MSG_CHANNEL_OPEN_FAILURE ) {
+        unsigned int reason_code =
+            _libssh2_ntohu32( session->open_data + 5 );
+        switch( reason_code ) {
+        case SSH_OPEN_ADMINISTRATIVELY_PROHIBITED:
+            _libssh2_error( session, LIBSSH2_ERROR_CHANNEL_FAILURE,
+                "Channel open failure "
+                "(administratively prohibited)" );
+            break;
+        case SSH_OPEN_CONNECT_FAILED:
+            _libssh2_error( session, LIBSSH2_ERROR_CHANNEL_FAILURE,
+                "Channel open failure (connect failed)" );
+            break;
+        case SSH_OPEN_UNKNOWN_CHANNELTYPE:
+            _libssh2_error( session, LIBSSH2_ERROR_CHANNEL_FAILURE,
+                "Channel open failure (unknown channel type)" );
+            break;
+        case SSH_OPEN_RESOURCE_SHORTAGE:
+            _libssh2_error( session, LIBSSH2_ERROR_CHANNEL_FAILURE,
+                "Channel open failure (resource shortage)" );
+            break;
+        default:
+            _libssh2_error( session, LIBSSH2_ERROR_CHANNEL_FAILURE,
+                "Channel open failure" );
+        }
+    }
+
+}
+
 /*
  * _libssh2_channel_open
  *
@@ -133,7 +266,9 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
                       uint32_t window_size,
                       uint32_t packet_size,
                       const unsigned char *message,
-                      size_t message_len)
+                      size_t message_len,
+                      void (*complete)( LIBSSH2_SESSION*session, LIBSSH2_CHANNEL* channel, void**abstract)
+                      )
 {
     static const unsigned char reply_codes[3] = {
         SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
@@ -153,8 +288,8 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
         session->open_local_channel = _libssh2_channel_nextid(session);
 
         /* Zero the whole thing out */
-        memset(&session->open_packet_requirev_state, 0,
-               sizeof(session->open_packet_requirev_state));
+        //memset(&session->open_packet_requirev_state, 0,
+        //       sizeof(session->open_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "Opening Channel - win %d pack %d", window_size,
@@ -192,9 +327,10 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
         s = session->open_packet =
             LIBSSH2_ALLOC(session, session->open_packet_len);
         if(!session->open_packet) {
-            _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
+            rc = _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
                            "Unable to allocate temporary space for packet");
-            goto channel_error;
+            libssh2_channel_open_final( session );
+            return NULL;
         }
         *(s++) = SSH_MSG_CHANNEL_OPEN;
         _libssh2_store_str(&s, channel_type, channel_type_len);
@@ -220,132 +356,22 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
         else if(rc) {
             _libssh2_error(session, rc,
                            "Unable to send channel-open request");
-            goto channel_error;
+            libssh2_channel_open_final( session );
+            return NULL;
         }
 
         session->open_state = libssh2_NB_state_sent;
     }
 
     if(session->open_state == libssh2_NB_state_sent) {
-        rc = _libssh2_packet_requirev(session, reply_codes,
-                                      &session->open_data,
-                                      &session->open_data_len, 1,
-                                      session->open_packet + 5 +
-                                      channel_type_len, 4,
-                                      &session->open_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            _libssh2_error(session, LIBSSH2_ERROR_EAGAIN, "Would block");
-            return NULL;
-        }
-        else if(rc) {
-            _libssh2_error(session, rc, "Unexpected error");
-            goto channel_error;
-        }
-
-        if(session->open_data_len < 1) {
-            _libssh2_error(session, LIBSSH2_ERROR_PROTO,
-                           "Unexpected packet size");
-            goto channel_error;
-        }
-
-        if(session->open_data[0] == SSH_MSG_CHANNEL_OPEN_CONFIRMATION) {
-
-            if(session->open_data_len < 17) {
-                _libssh2_error(session, LIBSSH2_ERROR_PROTO,
-                               "Unexpected packet size");
-                goto channel_error;
-            }
-
-            session->open_channel->remote.id =
-                _libssh2_ntohu32(session->open_data + 5);
-            session->open_channel->local.window_size =
-                _libssh2_ntohu32(session->open_data + 9);
-            session->open_channel->local.window_size_initial =
-                _libssh2_ntohu32(session->open_data + 9);
-            session->open_channel->local.packet_size =
-                _libssh2_ntohu32(session->open_data + 13);
-            _libssh2_debug((session, LIBSSH2_TRACE_CONN,
-                           "Connection Established - ID: %u/%u win: %u/%u"
-                           " pack: %u/%u",
-                           session->open_channel->local.id,
-                           session->open_channel->remote.id,
-                           session->open_channel->local.window_size,
-                           session->open_channel->remote.window_size,
-                           session->open_channel->local.packet_size,
-                           session->open_channel->remote.packet_size));
-            LIBSSH2_FREE(session, session->open_packet);
-            session->open_packet = NULL;
-            LIBSSH2_FREE(session, session->open_data);
-            session->open_data = NULL;
-
-            session->open_state = libssh2_NB_state_idle;
-            return session->open_channel;
-        }
-
-        if(session->open_data[0] == SSH_MSG_CHANNEL_OPEN_FAILURE) {
-            unsigned int reason_code =
-                _libssh2_ntohu32(session->open_data + 5);
-            switch(reason_code) {
-            case SSH_OPEN_ADMINISTRATIVELY_PROHIBITED:
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_FAILURE,
-                               "Channel open failure "
-                               "(administratively prohibited)");
-                break;
-            case SSH_OPEN_CONNECT_FAILED:
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_FAILURE,
-                               "Channel open failure (connect failed)");
-                break;
-            case SSH_OPEN_UNKNOWN_CHANNELTYPE:
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_FAILURE,
-                               "Channel open failure (unknown channel type)");
-                break;
-            case SSH_OPEN_RESOURCE_SHORTAGE:
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_FAILURE,
-                               "Channel open failure (resource shortage)");
-                break;
-            default:
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_FAILURE,
-                               "Channel open failure");
-            }
-        }
+        session->channel_open_receive = libssh2_channel_open_receive;
+        EnqueLink( &session->channel_opens, (POINTER)(complete?complete:session->channel_open) );
     }
 
-channel_error:
-
-    if(session->open_data) {
-        LIBSSH2_FREE(session, session->open_data);
-        session->open_data = NULL;
+//channel_error:
+    if( session->open_state == libssh2_NB_state_idle ) {
+        libssh2_channel_open_final( session );
     }
-    if(session->open_packet) {
-        LIBSSH2_FREE(session, session->open_packet);
-        session->open_packet = NULL;
-    }
-    if(session->open_channel) {
-        unsigned char channel_id[4];
-        LIBSSH2_FREE(session, session->open_channel->channel_type);
-
-        _libssh2_list_remove(&session->open_channel->node);
-
-        /* Clear out packets meant for this channel */
-        _libssh2_htonu32(channel_id, session->open_channel->local.id);
-        while((_libssh2_packet_ask(session, SSH_MSG_CHANNEL_DATA,
-                                   &session->open_data,
-                                   &session->open_data_len, 1,
-                                   channel_id, 4) >= 0)
-              ||
-              (_libssh2_packet_ask(session, SSH_MSG_CHANNEL_EXTENDED_DATA,
-                                   &session->open_data,
-                                   &session->open_data_len, 1,
-                                   channel_id, 4) >= 0)) {
-            LIBSSH2_FREE(session, session->open_data);
-            session->open_data = NULL;
-        }
-
-        LIBSSH2_FREE(session, session->open_channel);
-        session->open_channel = NULL;
-    }
-
-    session->open_state = libssh2_NB_state_idle;
     return NULL;
 }
 
@@ -369,8 +395,12 @@ libssh2_channel_open_ex(LIBSSH2_SESSION *session, const char *type,
                        _libssh2_channel_open(session, type, type_len,
                                              window_size, packet_size,
                                              (unsigned char *)msg,
-                                             msg_len));
+                                             msg_len,
+                                             NULL));
     return ptr;
+}
+
+static void channel_direct_tcp_complete( LIBSSH2_SESSION* session, LIBSSH2_CHANNEL* channel, void**abstract ) {
 }
 
 /*
@@ -384,6 +414,7 @@ channel_direct_tcpip(LIBSSH2_SESSION * session, const char *host,
 {
     LIBSSH2_CHANNEL *channel;
     unsigned char *s;
+    fprintf( stderr, "direct tcpip connections not supported yet\n" );
 
     if(session->direct_state == libssh2_NB_state_idle) {
         session->direct_host_len = strlen(host);
@@ -410,28 +441,30 @@ channel_direct_tcpip(LIBSSH2_SESSION * session, const char *host,
         _libssh2_store_u32(&s, sport);
     }
 
-    channel =
+    //channel =
         _libssh2_channel_open(session, "direct-tcpip",
                               sizeof("direct-tcpip") - 1,
                               LIBSSH2_CHANNEL_WINDOW_DEFAULT,
                               LIBSSH2_CHANNEL_PACKET_DEFAULT,
                               session->direct_message,
-                              session->direct_message_len);
-
+                              session->direct_message_len,
+                              channel_direct_tcp_complete
+                              );
+/*
     if(!channel &&
         libssh2_session_last_errno(session) == LIBSSH2_ERROR_EAGAIN) {
-        /* The error code is still set to LIBSSH2_ERROR_EAGAIN, set our state
-           to created to avoid re-creating the package on next invoke */
+        / * The error code is still set to LIBSSH2_ERROR_EAGAIN, set our state
+           to created to avoid re-creating the package on next invoke * /
         session->direct_state = libssh2_NB_state_created;
         return NULL;
     }
-    /* by default we set (keep?) idle state... */
+    / * by default we set (keep?) idle state... * /
     session->direct_state = libssh2_NB_state_idle;
 
     LIBSSH2_FREE(session, session->direct_message);
     session->direct_message = NULL;
-
-    return channel;
+    */
+    return NULL;
 }
 
 /*
@@ -465,7 +498,7 @@ channel_direct_streamlocal(LIBSSH2_SESSION * session, const char *socket_path,
 {
     LIBSSH2_CHANNEL *channel;
     unsigned char *s;
-
+    fprintf( stderr, "streamlocal tcpip connections not supported yet\n" );
     if(session->direct_state == libssh2_NB_state_idle) {
         session->direct_host_len = strlen(socket_path);
         session->direct_shost_len = strlen(shost);
@@ -494,7 +527,7 @@ channel_direct_streamlocal(LIBSSH2_SESSION * session, const char *socket_path,
                               LIBSSH2_CHANNEL_WINDOW_DEFAULT,
                               LIBSSH2_CHANNEL_PACKET_DEFAULT,
                               session->direct_message,
-                              session->direct_message_len);
+                              session->direct_message_len, NULL );
 
     if(!channel &&
         libssh2_session_last_errno(session) == LIBSSH2_ERROR_EAGAIN) {
@@ -533,6 +566,77 @@ libssh2_channel_direct_streamlocal_ex(LIBSSH2_SESSION * session,
     return ptr;
 }
 
+static void channel_forward_listen_receive( LIBSSH2_SESSION* session,
+    const unsigned char* data,
+    size_t datalen ) {
+
+    /*
+        { SSH_MSG_REQUEST_SUCCESS, SSH_MSG_REQUEST_FAILURE, 0 };
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        0, NULL, 0,
+        &session->fwdLstn_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        _libssh2_error( session, LIBSSH2_ERROR_EAGAIN, "Would block" );
+        return NULL;
+    } else if( rc || ( data_len < 1 ) ) {
+        _libssh2_error( session, LIBSSH2_ERROR_PROTO, "Unknown" );
+        session->fwdLstn_state = libssh2_NB_state_idle;
+        return NULL;
+    }
+    */
+    if( data[0] == SSH_MSG_REQUEST_SUCCESS ) {
+        LIBSSH2_LISTENER* listener;
+
+        listener = LIBSSH2_CALLOC( session, sizeof( LIBSSH2_LISTENER ) );
+        if( !listener )
+            _libssh2_error( session, LIBSSH2_ERROR_ALLOC,
+                "Unable to allocate memory for listener queue" );
+        else {
+            listener->host =
+                LIBSSH2_ALLOC( session, session->fwdLstn_host_len + 1 );
+            if( !listener->host ) {
+                _libssh2_error( session, LIBSSH2_ERROR_ALLOC,
+                    "Unable to allocate memory "
+                    "for listener queue" );
+                LIBSSH2_FREE( session, listener );
+                listener = NULL;
+            } else {
+                listener->session = session;
+                memcpy( listener->host, session->channel_forward_listen_host, session->fwdLstn_host_len );
+                listener->host[session->fwdLstn_host_len] = 0;
+                if( datalen >= 5 && !session->channel_forward_port ) {
+                    listener->port = _libssh2_ntohu32( data + 1 );
+                    _libssh2_debug( ( session, LIBSSH2_TRACE_CONN,
+                        "Dynamic tcpip-forward port "
+                        "allocated: %d",
+                        listener->port ) );
+                } else
+                    listener->port = session->channel_forward_port;
+
+                listener->queue_size = 0;
+                listener->queue_maxsize = session->channel_forward_queue_maxsize;
+
+                /* append this to the parent's list of listeners */
+                _libssh2_list_add( &session->listeners, &listener->node );
+
+                if( session->channel_forward_bound_port ) {
+                    *session->channel_forward_bound_port = listener->port;
+                }
+            }
+        }
+
+        LIBSSH2_FREE( session, data );
+        session->fwdLstn_state = libssh2_NB_state_idle;
+        return listener;
+    } else if( data[0] == SSH_MSG_REQUEST_FAILURE ) {
+        LIBSSH2_FREE( session, data );
+        _libssh2_error( session, LIBSSH2_ERROR_REQUEST_DENIED,
+            "Unable to complete request for forward-listen" );
+        session->fwdLstn_state = libssh2_NB_state_idle;
+        return NULL;
+    }
+}
+
 /*
  * channel_forward_listen
  *
@@ -549,7 +653,11 @@ channel_forward_listen(LIBSSH2_SESSION * session, const char *host,
 
     if(!host)
         host = "0.0.0.0";
-
+    session->channel_forward_listen_host = strdup( host );
+    session->channel_forward_port = port;
+    session->channel_forward_bound_port = bound_port;
+    session->channel_forward_queue_maxsize = queue_maxsize;
+    
     if(session->fwdLstn_state == libssh2_NB_state_idle) {
         session->fwdLstn_host_len = (uint32_t)strlen(host);
         /* 14 = packet_type(1) + request_len(4) + want_replay(1) + host_len(4)
@@ -559,8 +667,8 @@ channel_forward_listen(LIBSSH2_SESSION * session, const char *host,
             (uint32_t)(sizeof("tcpip-forward") - 1) + 14;
 
         /* Zero the whole thing out */
-        memset(&session->fwdLstn_packet_requirev_state, 0,
-               sizeof(session->fwdLstn_packet_requirev_state));
+        //memset(&session->fwdLstn_packet_requirev_state, 0,
+        //       sizeof(session->fwdLstn_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "Requesting tcpip-forward session for %s:%d", host,
@@ -611,75 +719,7 @@ channel_forward_listen(LIBSSH2_SESSION * session, const char *host,
     }
 
     if(session->fwdLstn_state == libssh2_NB_state_sent) {
-        unsigned char *data;
-        size_t data_len;
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      0, NULL, 0,
-                                      &session->fwdLstn_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            _libssh2_error(session, LIBSSH2_ERROR_EAGAIN, "Would block");
-            return NULL;
-        }
-        else if(rc || (data_len < 1)) {
-            _libssh2_error(session, LIBSSH2_ERROR_PROTO, "Unknown");
-            session->fwdLstn_state = libssh2_NB_state_idle;
-            return NULL;
-        }
-
-        if(data[0] == SSH_MSG_REQUEST_SUCCESS) {
-            LIBSSH2_LISTENER *listener;
-
-            listener = LIBSSH2_CALLOC(session, sizeof(LIBSSH2_LISTENER));
-            if(!listener)
-                _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
-                               "Unable to allocate memory for listener queue");
-            else {
-                listener->host =
-                    LIBSSH2_ALLOC(session, session->fwdLstn_host_len + 1);
-                if(!listener->host) {
-                    _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
-                                   "Unable to allocate memory "
-                                   "for listener queue");
-                    LIBSSH2_FREE(session, listener);
-                    listener = NULL;
-                }
-                else {
-                    listener->session = session;
-                    memcpy(listener->host, host, session->fwdLstn_host_len);
-                    listener->host[session->fwdLstn_host_len] = 0;
-                    if(data_len >= 5 && !port) {
-                        listener->port = _libssh2_ntohu32(data + 1);
-                        _libssh2_debug((session, LIBSSH2_TRACE_CONN,
-                                       "Dynamic tcpip-forward port "
-                                       "allocated: %d",
-                                       listener->port));
-                    }
-                    else
-                        listener->port = port;
-
-                    listener->queue_size = 0;
-                    listener->queue_maxsize = queue_maxsize;
-
-                    /* append this to the parent's list of listeners */
-                    _libssh2_list_add(&session->listeners, &listener->node);
-
-                    if(bound_port) {
-                        *bound_port = listener->port;
-                    }
-                }
-            }
-
-            LIBSSH2_FREE(session, data);
-            session->fwdLstn_state = libssh2_NB_state_idle;
-            return listener;
-        }
-        else if(data[0] == SSH_MSG_REQUEST_FAILURE) {
-            LIBSSH2_FREE(session, data);
-            _libssh2_error(session, LIBSSH2_ERROR_REQUEST_DENIED,
-                           "Unable to complete request for forward-listen");
-            session->fwdLstn_state = libssh2_NB_state_idle;
-            return NULL;
-        }
+        session->channel_forward_listen_receive = channel_forward_listen_receive;
     }
 
     session->fwdLstn_state = libssh2_NB_state_idle;
@@ -875,6 +915,41 @@ libssh2_channel_forward_accept(LIBSSH2_LISTENER *listener)
 
 }
 
+
+static void channel_setenv_receive( LIBSSH2_CHANNEL* channel, uint8_t* data, size_t datalen ) {
+    /*
+    static const unsigned char reply_codes[3] =
+        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->setenv_local_channel, 4,
+        &channel->
+        setenv_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    }
+    if( rc ) {
+        channel->setenv_state = libssh2_NB_state_idle;
+        return _libssh2_error( session, rc,
+            "Failed getting response for "
+            "channel-setenv" );
+    } else
+    */
+
+    if( datalen < 1 ) {
+        channel->setenv_state = libssh2_NB_state_idle;
+        _libssh2_error( channel->session, LIBSSH2_ERROR_PROTO,
+            "Unexpected packet size" );
+    } else if( data[0] == SSH_MSG_CHANNEL_SUCCESS ) {
+        LIBSSH2_FREE( channel->session, data );
+        channel->setenv_state = libssh2_NB_state_idle;
+        return 0;
+    } else {
+        channel->setenv_state = libssh2_NB_state_idle;
+        _libssh2_error( channel->session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
+            "Unable to complete request for channel-setenv" );
+    }
+
+}
 /*
  * channel_setenv
  *
@@ -886,8 +961,7 @@ static int channel_setenv(LIBSSH2_CHANNEL *channel,
 {
     LIBSSH2_SESSION *session = channel->session;
     unsigned char *s, *data;
-    static const unsigned char reply_codes[3] =
-        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    //static const unsigned char reply_codes[3] =  { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
     size_t data_len;
     int rc;
 
@@ -897,8 +971,8 @@ static int channel_setenv(LIBSSH2_CHANNEL *channel,
         channel->setenv_packet_len = varname_len + value_len + 21;
 
         /* Zero the whole thing out */
-        memset(&channel->setenv_packet_requirev_state, 0,
-               sizeof(channel->setenv_packet_requirev_state));
+        //memset(&channel->setenv_packet_requirev_state, 0,
+        //       sizeof(channel->setenv_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "Setting remote environment variable: %s=%s on "
@@ -950,33 +1024,10 @@ static int channel_setenv(LIBSSH2_CHANNEL *channel,
     }
 
     if(channel->setenv_state == libssh2_NB_state_sent) {
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      1, channel->setenv_local_channel, 4,
-                                      &channel->
-                                      setenv_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            return rc;
-        }
-        if(rc) {
-            channel->setenv_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, rc,
-                                  "Failed getting response for "
-                                  "channel-setenv");
-        }
-        else if(data_len < 1) {
-            channel->setenv_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
-                                  "Unexpected packet size");
-        }
-
-        if(data[0] == SSH_MSG_CHANNEL_SUCCESS) {
-            LIBSSH2_FREE(session, data);
-            channel->setenv_state = libssh2_NB_state_idle;
-            return 0;
-        }
-
-        LIBSSH2_FREE(session, data);
+        EnqueLink( &channel->receive, channel_setenv_receive );
     }
+    //channel->setenv_state = libssh2_NB_state_idle;
+    return 0;
 
     channel->setenv_state = libssh2_NB_state_idle;
     return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
@@ -1004,6 +1055,31 @@ libssh2_channel_setenv_ex(LIBSSH2_CHANNEL *channel,
     return rc;
 }
 
+
+static int channel_request_pty_receive( LIBSSH2_CHANNEL* channel, const uint8_t* data, size_t datalen ) {
+    unsigned char code;
+    /*
+    static const unsigned char reply_codes[3] =
+        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->reqPTY_local_channel, 4,
+        &channel->reqPTY_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    } else if( rc || data_len < 1 ) {
+        channel->reqPTY_state = libssh2_NB_state_idle;
+        return _libssh2_error( session, LIBSSH2_ERROR_PROTO,
+            "Failed to require the PTY package" );
+    }
+    */
+    code = data[0];
+
+    //LIBSSH2_FREE( chsession, data );
+    channel->reqPTY_state = libssh2_NB_state_idle;
+
+    if( code == SSH_MSG_CHANNEL_SUCCESS )
+        return 0;
+}
 /*
  * channel_request_pty
  * Duh... Request a PTY
@@ -1016,8 +1092,7 @@ static int channel_request_pty(LIBSSH2_CHANNEL *channel,
 {
     LIBSSH2_SESSION *session = channel->session;
     unsigned char *s;
-    static const unsigned char reply_codes[3] =
-        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    //static const unsigned char reply_codes[3] = { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
     int rc;
 
     if(channel->reqPTY_state == libssh2_NB_state_idle) {
@@ -1032,8 +1107,8 @@ static int channel_request_pty(LIBSSH2_CHANNEL *channel,
         channel->reqPTY_packet_len = term_len + modes_len + 41;
 
         /* Zero the whole thing out */
-        memset(&channel->reqPTY_packet_requirev_state, 0,
-               sizeof(channel->reqPTY_packet_requirev_state));
+        //memset(&channel->reqPTY_packet_requirev_state, 0,
+        //       sizeof(channel->reqPTY_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "Allocating tty on channel %u/%u", channel->local.id,
@@ -1077,33 +1152,41 @@ static int channel_request_pty(LIBSSH2_CHANNEL *channel,
     }
 
     if(channel->reqPTY_state == libssh2_NB_state_sent) {
-        unsigned char *data;
-        size_t data_len;
-        unsigned char code;
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      1, channel->reqPTY_local_channel, 4,
-                                      &channel->reqPTY_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            return rc;
-        }
-        else if(rc || data_len < 1) {
-            channel->reqPTY_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
-                                  "Failed to require the PTY package");
-        }
-
-        code = data[0];
-
-        LIBSSH2_FREE(session, data);
-        channel->reqPTY_state = libssh2_NB_state_idle;
-
-        if(code == SSH_MSG_CHANNEL_SUCCESS)
-            return 0;
+        EnqueLink( &channel->receive, channel_request_pty_receive );
+        return 0;
     }
 
     return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
                           "Unable to complete request for "
                           "channel request-pty");
+}
+
+
+static void channel_request_auth_agent_receive( LIBSSH2_CHANNEL*channel, const uint8_t*data, size_t datalen ) {
+    unsigned char code;
+    /*
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->req_auth_agent_local_channel,
+        4,
+        &channel->req_auth_agent_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    } else if( rc ) {
+        channel->req_auth_agent_state = libssh2_NB_state_idle;
+        return _libssh2_error( session, LIBSSH2_ERROR_PROTO,
+            "Failed to request auth-agent" );
+    }
+    */
+    code = data[0];
+
+    LIBSSH2_FREE( channel->session, data );
+    channel->req_auth_agent_state = libssh2_NB_state_idle;
+
+    if( code == SSH_MSG_CHANNEL_SUCCESS )
+        return 0;
+    else
+        _libssh2_error( channel->session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
+            "Unable to complete request for auth-agent" );
 }
 
 /**
@@ -1180,30 +1263,7 @@ static int channel_request_auth_agent(LIBSSH2_CHANNEL *channel,
     }
 
     if(channel->req_auth_agent_state == libssh2_NB_state_sent) {
-        unsigned char *data;
-        size_t data_len;
-        unsigned char code;
-
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      1, channel->req_auth_agent_local_channel,
-                                      4,
-                                      &channel->req_auth_agent_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            return rc;
-        }
-        else if(rc) {
-            channel->req_auth_agent_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
-                                  "Failed to request auth-agent");
-        }
-
-        code = data[0];
-
-        LIBSSH2_FREE(session, data);
-        channel->req_auth_agent_state = libssh2_NB_state_idle;
-
-        if(code == SSH_MSG_CHANNEL_SUCCESS)
-            return 0;
+        return 0;
     }
 
     return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
@@ -1299,8 +1359,8 @@ channel_request_pty_size(LIBSSH2_CHANNEL * channel, int width,
         channel->reqPTY_packet_len = 39;
 
         /* Zero the whole thing out */
-        memset(&channel->reqPTY_packet_requirev_state, 0,
-               sizeof(channel->reqPTY_packet_requirev_state));
+        //memset(&channel->reqPTY_packet_requirev_state, 0,
+        //       sizeof(channel->reqPTY_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "changing tty size on channel %u/%u",
@@ -1362,6 +1422,34 @@ libssh2_channel_request_pty_size_ex(LIBSSH2_CHANNEL *channel, int width,
 /* Keep this an even number */
 #define LIBSSH2_X11_RANDOM_COOKIE_LEN       32
 
+static void channel_x11_receive( LIBSSH2_CHANNEL* channel, const uint8_t* data, size_t datalen ) {
+    unsigned char code;
+    /*
+    static const unsigned char reply_codes[3] =
+        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->reqX11_local_channel, 4,
+        &channel->reqX11_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    } else if( rc ) {
+        channel->reqX11_state = libssh2_NB_state_idle;
+        return _libssh2_error( session, LIBSSH2_ERROR_PROTO,
+            "Failed to require the X11 package" );
+    }
+    */
+    code = data[0];
+
+    LIBSSH2_FREE( channel->session, data );
+    channel->reqX11_state = libssh2_NB_state_idle;
+
+    if( code == SSH_MSG_CHANNEL_SUCCESS )
+        return 0;
+    else
+        _libssh2_error( channel->session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
+            "Unable to complete request for X11" );
+}
+
 /*
  * channel_x11_req
  * Request X11 forwarding
@@ -1373,8 +1461,7 @@ channel_x11_req(LIBSSH2_CHANNEL *channel, int single_connection,
 {
     LIBSSH2_SESSION *session = channel->session;
     unsigned char *s;
-    static const unsigned char reply_codes[3] =
-        { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
+    //static const unsigned char reply_codes[3] = { SSH_MSG_CHANNEL_SUCCESS, SSH_MSG_CHANNEL_FAILURE, 0 };
     size_t proto_len =
         auth_proto ? strlen(auth_proto) : (sizeof("MIT-MAGIC-COOKIE-1") - 1);
     size_t cookie_len =
@@ -1388,8 +1475,8 @@ channel_x11_req(LIBSSH2_CHANNEL *channel, int single_connection,
         channel->reqX11_packet_len = proto_len + cookie_len + 30;
 
         /* Zero the whole thing out */
-        memset(&channel->reqX11_packet_requirev_state, 0,
-               sizeof(channel->reqX11_packet_requirev_state));
+        //memset(&channel->reqX11_packet_requirev_state, 0,
+        //       sizeof(channel->reqX11_packet_requirev_state));
 
         _libssh2_debug((session, LIBSSH2_TRACE_CONN,
                        "Requesting x11-req for channel %u/%u: single=%d "
@@ -1468,32 +1555,33 @@ channel_x11_req(LIBSSH2_CHANNEL *channel, int single_connection,
     }
 
     if(channel->reqX11_state == libssh2_NB_state_sent) {
-        size_t data_len;
-        unsigned char *data;
-        unsigned char code;
-
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      1, channel->reqX11_local_channel, 4,
-                                      &channel->reqX11_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            return rc;
-        }
-        else if(rc || data_len < 1) {
-            channel->reqX11_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, rc,
-                                  "waiting for x11-req response packet");
-        }
-
-        code = data[0];
-        LIBSSH2_FREE(session, data);
-        channel->reqX11_state = libssh2_NB_state_idle;
-
-        if(code == SSH_MSG_CHANNEL_SUCCESS)
-            return 0;
+        EnqueLink( &channel->receive, channel_x11_receive );
+        return 0;
     }
 
     return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
                           "Unable to complete request for channel x11-req");
+}
+
+static void libssh2_channel_x11_req_ex_receive( LIBSSH2_CHANNEL* channel, const uint8_t* data, size_t datalen ) {
+    unsigned char code;
+    /*
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->process_local_channel, 4,
+        &channel->process_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    } else if( rc || data_len < 1 ) {
+        channel->process_state = libssh2_NB_state_end;
+        return _libssh2_error( session, rc,
+            "Failed waiting for channel success" );
+    }
+    */
+    code = data[0];
+    channel->process_state = libssh2_NB_state_end;
+
+    if( code == SSH_MSG_CHANNEL_SUCCESS )
+        return 0;
 }
 
 /*
@@ -1517,6 +1605,32 @@ libssh2_channel_x11_req_ex(LIBSSH2_CHANNEL *channel, int single_connection,
 }
 
 
+static void libssh2_channel_process_startup_complete( LIBSSH2_CHANNEL*channel, const uint8_t *data, size_t data_len ){
+    unsigned char code;
+    /*
+    rc = _libssh2_packet_requirev( session, reply_codes, &data, &data_len,
+        1, channel->process_local_channel, 4,
+        &channel->process_packet_requirev_state );
+    if( rc == LIBSSH2_ERROR_EAGAIN ) {
+        return rc;
+    } else if( rc || data_len < 1 ) {
+        channel->process_state = libssh2_NB_state_end;
+        return _libssh2_error( session, rc,
+            "Failed waiting for channel success" );
+    }
+    */
+    code = data[0];
+    //LIBSSH2_FREE( session, data );
+    channel->process_state = libssh2_NB_state_end;
+
+    if( code == SSH_MSG_CHANNEL_SUCCESS ) {
+
+        return 0;
+    }
+    return _libssh2_error( channel->session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
+        "Unable to complete request for channel-process-startup" );
+}
+
 /*
  * _libssh2_channel_process_startup
  *
@@ -1525,7 +1639,9 @@ libssh2_channel_x11_req_ex(LIBSSH2_CHANNEL *channel, int single_connection,
 int
 _libssh2_channel_process_startup(LIBSSH2_CHANNEL *channel,
                                  const char *request, size_t request_len,
-                                 const char *message, size_t message_len)
+                                 const char *message, size_t message_len,
+                                 void (*complete)( LIBSSH2_CHANNEL* channel, const uint8_t* data, size_t datalen )
+    )
 {
     LIBSSH2_SESSION *session = channel->session;
     unsigned char *s;
@@ -1543,8 +1659,8 @@ _libssh2_channel_process_startup(LIBSSH2_CHANNEL *channel,
         channel->process_packet_len = request_len + 10;
 
         /* Zero the whole thing out */
-        memset(&channel->process_packet_requirev_state, 0,
-               sizeof(channel->process_packet_requirev_state));
+        //memset(&channel->process_packet_requirev_state, 0,
+        //       sizeof(channel->process_packet_requirev_state));
 
         if(message)
             channel->process_packet_len += + 4;
@@ -1597,27 +1713,9 @@ _libssh2_channel_process_startup(LIBSSH2_CHANNEL *channel,
     }
 
     if(channel->process_state == libssh2_NB_state_sent) {
-        unsigned char *data;
-        size_t data_len;
-        unsigned char code;
-        rc = _libssh2_packet_requirev(session, reply_codes, &data, &data_len,
-                                      1, channel->process_local_channel, 4,
-                                      &channel->process_packet_requirev_state);
-        if(rc == LIBSSH2_ERROR_EAGAIN) {
-            return rc;
-        }
-        else if(rc || data_len < 1) {
-            channel->process_state = libssh2_NB_state_end;
-            return _libssh2_error(session, rc,
-                                  "Failed waiting for channel success");
-        }
 
-        code = data[0];
-        LIBSSH2_FREE(session, data);
-        channel->process_state = libssh2_NB_state_end;
-
-        if(code == SSH_MSG_CHANNEL_SUCCESS)
-            return 0;
+        EnqueLink( &channel->receive, complete?complete: libssh2_channel_process_startup_complete );
+        return 0;
     }
 
     return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED,
@@ -1642,7 +1740,7 @@ libssh2_channel_process_startup(LIBSSH2_CHANNEL *channel,
 
     BLOCK_ADJUST(rc, channel->session,
                  _libssh2_channel_process_startup(channel, req, req_len,
-                                                  msg, msg_len));
+                                                  msg, msg_len, libssh2_channel_process_startup_complete ));
     return rc;
 }
 
@@ -2005,7 +2103,7 @@ _libssh2_channel_extended_data(LIBSSH2_CHANNEL *channel, int ignore_mode)
 
         channel->extData2_state = libssh2_NB_state_created;
     }
-
+    /*
     if(channel->extData2_state == libssh2_NB_state_idle) {
         if(ignore_mode == LIBSSH2_CHANNEL_EXTENDED_DATA_IGNORE) {
             int rc =
@@ -2015,6 +2113,7 @@ _libssh2_channel_extended_data(LIBSSH2_CHANNEL *channel, int ignore_mode)
                 return rc;
         }
     }
+    */
 
     channel->extData2_state = libssh2_NB_state_idle;
     return 0;
@@ -3072,4 +3171,26 @@ libssh2_channel_signal_ex(LIBSSH2_CHANNEL *channel,
     BLOCK_ADJUST(rc, channel->session,
                  channel_signal(channel, signame, signame_len));
     return rc;
+}
+
+
+libssh2_cb_generic*
+libssh2_channel_callback_set( LIBSSH2_CHANNEL* channel, enum LIBSSH2_CALLBACKS cbtype,
+    libssh2_cb_generic* callback ) {
+    libssh2_cb_generic* old_cb = NULL;
+    switch( cbtype ) {
+        case LIBSSH2_CALLBACK_CHANNEL_CLOSE:
+            old_cb = (libssh2_cb_generic*)channel->close_cb;
+            channel->close_cb = (LIBSSH2_CHANNEL_CLOSE_FUNC((*)))callback;
+            break;
+        case LIBSSH2_CALLBACK_CHANNEL_DATA:
+            old_cb = (libssh2_cb_generic*)channel->data_cb;
+            channel->data_cb = (LIBSSH2_CHANNEL_DATA_FUNC(( * )))callback;
+            break;
+    }
+    return old_cb;
+}
+
+void** libssh2_channel_abstract( LIBSSH2_CHANNEL* channel ) {
+    return &channel->abstract;
 }

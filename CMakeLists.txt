@@ -54,13 +54,13 @@ project(libssh2 C)
 
 set(CMAKE_UNITY_BUILD_BATCH_SIZE 32)
 
-option(BUILD_STATIC_LIBS "Build Static Libraries" ON)
-add_feature_info("Static library" BUILD_STATIC_LIBS
-  "creating libssh2 static library")
+#option(BUILD_STATIC_LIBS "Build Static Libraries" ON)
+#add_feature_info("Static library" BUILD_STATIC_LIBS
+#  "creating libssh2 static library")
 
-option(BUILD_SHARED_LIBS "Build Shared Libraries" ON)
-add_feature_info("Shared library" BUILD_SHARED_LIBS
-  "creating libssh2 shared library (.so/.dll)")
+#option(BUILD_SHARED_LIBS "Build Shared Libraries" ON)
+#add_feature_info("Shared library" BUILD_SHARED_LIBS
+#  "creating libssh2 shared library (.so/.dll)")
 
 # Parse version
 
@@ -108,16 +108,21 @@ else()
   endif()
 endif()
 
-option(BUILD_EXAMPLES "Build libssh2 examples" ON)
-option(BUILD_TESTING "Build libssh2 test suite" ON)
+#option(BUILD_EXAMPLES "Build libssh2 examples" ON)
+#option(BUILD_TESTING "Build libssh2 test suite" ON)
 
-if(NOT BUILD_STATIC_LIBS AND NOT BUILD_SHARED_LIBS)
-  set(BUILD_STATIC_LIBS ON)
+if(NOT LIBSSH2_BUILD_STATIC_LIBS AND NOT LIBSSH2_BUILD_SHARED_LIBS)
+  set(LIBSSH2_BUILD_STATIC_LIBS ON)
 endif()
 
 set(LIB_NAME "libssh2")
+if( LIBSSH2_BUILD_STATIC_LIBS AND LIBSSH2_BUILD_SHARED_LIBS )
 set(LIB_STATIC "${LIB_NAME}_static")
 set(LIB_SHARED "${LIB_NAME}_shared")
+else()
+set(LIB_STATIC "${LIB_NAME}")
+set(LIB_SHARED "${LIB_NAME}")
+endif()
 
 # lib flavour selected for example and test programs.
 if(BUILD_SHARED_LIBS)

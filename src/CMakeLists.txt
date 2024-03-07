@@ -97,16 +97,25 @@ set(SOURCES ${CSOURCES} ${HHEADERS})
 # when building both static and shared library. On Windows, with certain
 # toolchains (e.g. MSVC) these libraries get the same by default, overwriting
 # each other. MinGW is not affected.
-if(WIN32 AND BUILD_STATIC_LIBS AND BUILD_SHARED_LIBS AND
+if(WIN32 AND LIBSSH2_BUILD_STATIC_LIBS AND LIBSSH2_BUILD_SHARED_LIBS AND
    NOT STATIC_LIB_SUFFIX AND NOT IMPORT_LIB_SUFFIX AND
    CMAKE_STATIC_LIBRARY_SUFFIX STREQUAL CMAKE_IMPORT_LIBRARY_SUFFIX)
   set(STATIC_LIB_SUFFIX "_static")
 endif()
 
+if( LIBSSH2_EXPORT_SYMBOLS AND WIN32 )
+  ADD_DEFINITIONS( -DLIBSSH2_EXPORTS )
+endif()
+
 # we want it to be called libssh2 on all platforms
-if(BUILD_STATIC_LIBS)
+if(LIBSSH2_BUILD_STATIC_LIBS)
   list(APPEND libssh2_export ${LIB_STATIC})
-  add_library(${LIB_STATIC} STATIC ${SOURCES})
+  if( LIBSSH2_BUILD_OBJECT_LIBRARY )
+     message( "MAKING OBJECT LIBRARY")
+    add_library(${LIB_STATIC} OBJECT ${SOURCES})
+  else()
+    add_library(${LIB_STATIC} STATIC ${SOURCES})
+  endif()
   add_library(${PROJECT_NAME}::${LIB_STATIC} ALIAS ${LIB_STATIC})
   target_compile_definitions(${LIB_STATIC} PRIVATE ${PRIVATE_COMPILE_DEFINITIONS} ${libssh2_DEFINITIONS})
   target_link_libraries(${LIB_STATIC} PRIVATE ${LIBRARIES})
@@ -120,7 +129,7 @@ if(BUILD_STATIC_LIBS)
       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
       "$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_INCLUDEDIR}>")
 endif()
-if(BUILD_SHARED_LIBS)
+if(LIBSSH2_BUILD_SHARED_LIBS)
   list(APPEND libssh2_export ${LIB_SHARED})
   add_library(${LIB_SHARED} SHARED ${SOURCES})
   add_library(${PROJECT_NAME}::${LIB_SHARED} ALIAS ${LIB_SHARED})
@@ -143,7 +152,9 @@ if(BUILD_SHARED_LIBS)
 endif()
 
 add_library(${PROJECT_NAME}::${LIB_NAME} ALIAS ${LIB_SELECTED})
-add_library(${LIB_NAME} ALIAS ${LIB_SELECTED})
+if( NOT ${LIB_NAME} STREQUAL ${LIB_SELECTED} )
+    add_library(${LIB_NAME} ALIAS ${LIB_SELECTED})
+endif()
 
 ## Installation
 
@@ -153,14 +164,14 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/include/libssh2_sftp.h"
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-if(BUILD_STATIC_LIBS)
+if(LIBSSH2_BUILD_STATIC_LIBS)
   install(TARGETS ${LIB_STATIC}
     EXPORT "${PROJECT_NAME}-targets"
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
-if(BUILD_SHARED_LIBS)
+if(LIBSSH2_BUILD_SHARED_LIBS)
   install(TARGETS ${LIB_SHARED}
     EXPORT "${PROJECT_NAME}-targets"
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -200,7 +211,7 @@ if(LIBSSH2_PC_LIBS_PRIVATE)
   string(REPLACE ";" " " LIBSSH2_PC_LIBS_PRIVATE "${LIBSSH2_PC_LIBS_PRIVATE}")
 endif()
 # merge the pkg-config private fields into public ones when static-only
-if(BUILD_SHARED_LIBS)
+if(LIBSSH2_BUILD_SHARED_LIBS)
   set(LIBSSH2_PC_REQUIRES "")
   set(LIBSSH2_PC_LIBS "")
 else()
